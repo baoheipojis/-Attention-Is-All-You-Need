@@ -3,8 +3,8 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu") 
-# device = torch.device("cpu")
+# device = torch.device("mps" if torch.backends.mps.is_available() else "cpu") 
+device = torch.device("cpu")
 # 数据准备
 def generate_data(num_samples=5):
     # X的形状是(num_samples, 2)，从0到9之间随机选择
@@ -23,17 +23,17 @@ class SimpleMLP(nn.Module):
     def __init__(self):
         super(SimpleMLP, self).__init__()
         # fc是全连接层，它会连接输入的所有特征和输出的所有特征。全连接层=线性层
-        self.fc1 = nn.Linear(2, 16)
-        self.fc2 = nn.Linear(16, 8)
-        self.fc3 = nn.Linear(8, 1)
+        self.fc1 = nn.Linear(2, 1)
+        # self.fc2 = nn.Linear(16, 8)
+        # self.fc3 = nn.Linear(8, 1)
 
     def forward(self, x):
         # relu是把负值变0，正值不变。可以删掉试试看。其实对于本次实验是无所谓的。
         # x = torch.relu(self.fc1(x))
         # x = torch.relu(self.fc2(x))
         x = self.fc1(x)
-        x = self.fc2(x)
-        x = self.fc3(x)
+        # x = self.fc2(x)
+        # x = self.fc3(x)
         return x
 
 # 初始化模型、损失函数和优化器
@@ -43,7 +43,7 @@ criterion = nn.MSELoss().to(device)
 optimizer = optim.Adam(model.parameters(), lr=0.001)
 
 # 训练模型
-num_epochs = 10000
+num_epochs = 20000
 for epoch in range(num_epochs):
     # 一些层的表现在训练和推理下可能不同，这里把它们设为训练模式。
     model.train()
