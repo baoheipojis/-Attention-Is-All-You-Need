@@ -3,68 +3,77 @@ import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 
-# device = torch.device("mps" if torch.backends.mps.is_available() else "cpu") 
-device = torch.device("cpu")
-# 数据准备
-def generate_data(num_samples=5):
-    # X的形状是(num_samples, 2)，从0到9之间随机选择
-    X = np.random.randint(0, 10, (num_samples, 2))
-    # axis=1表示对每行进行求和，每行的大小是2（就是列数）。
-    y = X.sum(axis=1)
-    return X, y
+# 汉字列表
+chinese_chars = list("零一二三四五六七八九")
 
-# 将数据转换为 PyTorch 张量
-X, y = generate_data()
-X = torch.tensor(X, dtype=torch.float32).to(device)
-y = torch.tensor(y, dtype=torch.float32).unsqueeze(1).to(device)
+# 生成训练数据
+def generate_data(num_samples=50):
+    x = np.random.choice(chinese_chars, (num_samples, 2))
+    y = np.array([chinese_chars.index(a) + chinese_chars.index(b) for a, b in x])
+    return x, y
 
-# 定义模型
-class SimpleMLP(nn.Module):
-    def __init__(self):
-        super(SimpleMLP, self).__init__()
-        # fc是全连接层，它会连接输入的所有特征和输出的所有特征。全连接层=线性层
-        self.fc1 = nn.Linear(2, 1)
-        # self.fc2 = nn.Linear(16, 8)
-        # self.fc3 = nn.Linear(8, 1)
+# 定义神经网络模型
+class AddNet(nn.Module):
+    def __init__(self, vocab_size, embedding_dim):
+        super(AddNet, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.fc1 = nn.Linear(embedding_dim * 2, 10)
+        self.fc2 = nn.Linear(10, 1)
 
     def forward(self, x):
-        # relu是把负值变0，正值不变。可以删掉试试看。其实对于本次实验是无所谓的。
-        # x = torch.relu(self.fc1(x))
-        # x = torch.relu(self.fc2(x))
-        x = self.fc1(x)
-        # x = self.fc2(x)
-        # x = self.fc3(x)
+        x = self.embedding(x)
+        x = x.view(x.size(0), -1)  # 展平嵌入向量
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
         return x
 
-# 初始化模型、损失函数和优化器
-model = SimpleMLP().to(device)
-criterion = nn.MSELoss().to(device)
-# 使用Adam优化器
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-
 # 训练模型
-num_epochs = 20000
-for epoch in range(num_epochs):
-    # 一些层的表现在训练和推理下可能不同，这里把它们设为训练模式。
-    model.train()
-    optimizer.zero_grad()
-    outputs = model(X)
-    loss = criterion(outputs, y)
-    loss.backward()
-    # 根据梯度更新参数
-    optimizer.step()
-    
-    if (epoch + 1) % 100 == 0:
-        print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}')
+def train_model(model, criterion, optimizer, x_train, y_train, num_epochs=1000):
+    for epoch in range(num_epochs):
+        model.train()
+        inputs = torch.tensor([[chinese_chars.index(char) for char in pair] for pair in x_train], dtype=torch.long)
+        targets = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
 
-# 评估模型
-model.eval()
-with torch.no_grad():
-    test_X = torch.tensor([[3, 7], [5, 2], [9, 0]], dtype=torch.float32)
-    test_y = torch.tensor([[10], [7], [9]], dtype=torch.float32)
-    test_outputs = model(test_X)
-    test_loss = criterion(test_outputs, test_y)
-    print(f'Test Loss: {test_loss.item():.4f}')
-    print('Predictions:')
-    for i in range(len(test_X)):
-        print(f'Input: {test_X[i].numpy()}, Predicted: {test_outputs[i].item():.2f}, Actual: {test_y[i].item()}')
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+
+        if (epoch + 1) % 100 == 0:
+            print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}')
+
+# 测试模型
+def test_model(model, char_a, char_b):
+    model.eval()
+    with torch.no_grad():
+        idx_a = chinese_chars.index(char_a)
+        idx_b = chinese_chars.index(char_b)
+        inputs = torch.tensor([[idx_a, idx_b]], dtype=torch.long)
+        output = model(inputs)
+        return output.item()
+
+# 主函数
+if __name__ == "__main__":
+    # 生成数据
+    x_train, y_train = generate_data()
+
+    # 初始化模型、损失函数和优化器
+    vocab_size = len(chinese_chars)  # 输入汉字的范围
+    embedding_dim = 10  # 嵌入向量的维度
+    model = AddNet(vocab_size, embedding_dim)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.01)
+
+    # 训练模型
+    train_model(model, criterion, optimizer, x_train, y_train)
+
+    # 测试模型
+    char_a, char_b = '一', '二'
+    c = test_model(model, char_a, char_b)
+    print(f'{char_a} + {char_b} = {c:.2f}')
+
+    # 进一步测试 a + d = e
+    char_d = '三'
+    e = test_model(model, char_a, char_d)
+    print(f'{char_a} + {char_d} = {e:.2f}')

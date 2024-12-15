@@ -1,67 +1,108 @@
-# 这段代码只能说能跑，实际上MSE一直是20多，说明线性模型已经无法处理该问题了。
+import torch
+import torch.nn as nn
+import torch.optim as optim
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
 
-# 1. 数据准备
-# 生成随机表达式和结果
-def generate_data(num_samples):
-    expressions = []
-    results = []
+device = torch.device("cpu")
+
+# 操作符列表
+operators = ['+', '-']
+digits = list("0123456789")
+
+# 生成训练数据
+def generate_data(num_samples=5000):  # Increased number of samples
+    x = []
+    y = []
     for _ in range(num_samples):
+        length = np.random.randint(3, 10)  # 随机生成表达式长度
         expression = ""
         result = 0
-        for _ in range(np.random.randint(1, 5)):  # 生成1到4个数字的加减表达式
-            num = np.random.randint(1, 10)
-            operation = np.random.choice(['+', '-'])
-            expression += str(num) + operation
-        result = eval(expression[:-1])  # 计算表达式的结果
-        expressions.append(expression)
-        results.append(result)
-    return expressions, results
+        for i in range(length):
+            if i % 2 == 0:
+                num = np.random.randint(0, 10)
+                expression += str(num)
+                if i == 0:
+                    result = num
+                else:
+                    if expression[i-1] == '+':
+                        result += num
+                    elif expression[i-1] == '-':
+                        result -= num
+            else:
+                op = np.random.choice(operators)
+                expression += op
+        x.append([digits.index(char) if char in digits else len(digits) + operators.index(char) for char in expression])
+        y.append(result)
+    # Normalize targets
+    y = np.array(y, dtype=np.float32)
+    y = (y - y.mean()) / y.std()
+    return x, y
 
-# 生成1000个样本
-expressions, results = generate_data(1000)
+# 定义神经网络模型
+class AddSubNet(nn.Module):
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, num_layers=2):  # Added num_layers
+        super(AddSubNet, self).__init__()
+        self.embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, num_layers=num_layers, batch_first=True, dropout=0.2)
+        self.fc = nn.Linear(hidden_dim, 1)
 
-# 将结果转换为numpy数组
-results = np.array(results)
+    def forward(self, x):
+        x = self.embedding(x)
+        _, (hn, _) = self.lstm(x)
+        x = self.fc(hn[-1])
+        return x
 
-# 2. 模型设计
-# 文本向量化
-tokenizer = Tokenizer(char_level=True)
-tokenizer.fit_on_texts(expressions)
-sequences = tokenizer.texts_to_sequences(expressions)
-max_length = max(len(seq) for seq in sequences)
-padded_sequences = pad_sequences(sequences, maxlen=max_length, padding='post')
+# 训练模型
+def train_model(model, criterion, optimizer, x_train, y_train, num_epochs=2000):  # Increased epochs
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=500, gamma=0.1)  # Added scheduler
+    for epoch in range(num_epochs):
+        model.train()
+        inputs = torch.nn.utils.rnn.pad_sequence([torch.tensor(seq, dtype=torch.long).to(device) for seq in x_train], batch_first=True)
+        targets = torch.tensor(y_train, dtype=torch.float32).view(-1, 1).to(device)
 
-# 神经网络模型
-model = tf.keras.Sequential([
-    tf.keras.layers.Embedding(input_dim=len(tokenizer.word_index) + 1, output_dim=8, input_length=max_length),
-    tf.keras.layers.GlobalAveragePooling1D(),
-    tf.keras.layers.Dense(32, activation='relu'),
-    tf.keras.layers.Dense(1)
-])
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, targets)
+        loss.backward()
+        optimizer.step()
+        scheduler.step()
 
-model.compile(optimizer='adam', loss='mse')
+        if (epoch + 1) % 100 == 0:
+            print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}')
 
-# 3. 训练模型
-model.fit(padded_sequences, results, epochs=100, verbose=1)
+# 测试模型
+def test_model(model, expression):
+    model.eval()
+    with torch.no_grad():
+        tokens = [digits.index(char) if char in digits else len(digits) + operators.index(char) for char in expression]
+        inputs = torch.tensor([tokens], dtype=torch.long).to(device)
+        output = model(inputs)
+        # Denormalize output
+        output = output.item() * y_std + y_mean
+        return output
 
-# 返回训练好的模型和tokenizer
-model, tokenizer, max_length
-# 假设这是您的新表达式
-new_expressions = ["2+3", "4-1", "5+2-3","6+4-2"]
+# 主函数
+if __name__ == "__main__":
+    # 生成数据
+    x_train, y_train = generate_data()
 
-# 使用相同的tokenizer将新表达式转换为序列
-new_sequences = tokenizer.texts_to_sequences(new_expressions)
+    # 计算均值和标准差 for normalization
+    y_mean = np.mean(y_train)
+    y_std = np.std(y_train)
+    y_train = (y_train - y_mean) / y_std
 
-# 填充序列以确保它们具有相同的长度
-new_padded_sequences = pad_sequences(new_sequences, maxlen=max_length, padding='post')
+    # 初始化模型、损失函数和优化器
+    vocab_size = len(digits) + len(operators)
+    embedding_dim = 32  # Increased embedding dimension
+    hidden_dim = 64  # Increased hidden dimension
+    model = AddSubNet(vocab_size, embedding_dim, hidden_dim).to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)  # Adjusted learning rate
 
-# 使用模型进行预测
-predictions = model.predict(new_padded_sequences)
+    # 训练模型
+    train_model(model, criterion, optimizer, x_train, y_train)
 
-# 打印预测结果
-for expr, pred in zip(new_expressions, predictions):
-    print(f"Expression: {expr}, Predicted Result: {pred[0]:.2f}")
+    # 测试模型
+    expression = "1+2+1-3"
+    result = test_model(model, expression)
+    print(f'{expression} = {result:.2f}')
