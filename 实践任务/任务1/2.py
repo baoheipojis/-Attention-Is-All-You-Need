@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from sklearn.model_selection import train_test_split
 
 # 定义词汇表
 digits = [str(i) for i in range(10)]
@@ -11,7 +12,7 @@ char_to_idx = {ch: idx for idx, ch in enumerate(vocab)}
 idx_to_char = {idx: ch for idx, ch in enumerate(vocab)}
 
 # 生成数据集
-def generate_data(num_samples=10000):
+def generate_data(num_samples=1000):
     expressions = []
     targets = []
     for _ in range(num_samples):
@@ -43,11 +44,11 @@ def encode_expression(expr):
     return torch.tensor([char_to_idx[ch] for ch in expr], dtype=torch.long)
 
 # 训练模型
-def train_model(model, criterion, optimizer, expressions, targets, epochs=5):
+def train_model(model, criterion, optimizer, x_train, y_train, x_val, y_val, epochs=10):
     model.train()
     for epoch in range(epochs):
         total_loss = 0
-        for expr, target in zip(expressions, targets):
+        for expr, target in zip(x_train, y_train):
             optimizer.zero_grad()
             input_seq = encode_expression(expr).unsqueeze(0)
             output = model(input_seq)
@@ -55,7 +56,17 @@ def train_model(model, criterion, optimizer, expressions, targets, epochs=5):
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        print(f'Epoch {epoch+1}, Loss: {total_loss/len(expressions):.4f}')
+        
+        val_loss = 0
+        model.eval()
+        with torch.no_grad():
+            for expr, target in zip(x_val, y_val):
+                input_seq = encode_expression(expr).unsqueeze(0)
+                output = model(input_seq)
+                loss = criterion(output, torch.tensor(target, dtype=torch.float))
+                val_loss += loss.item()
+        
+        print(f'Epoch {epoch+1}, Loss: {total_loss/len(x_train):.4f}, Val Loss: {val_loss/len(x_val):.4f}')
 
 # 测试模型
 def test_model(model, expression):
@@ -69,17 +80,18 @@ def test_model(model, expression):
 if __name__ == "__main__":
     # 生成数据
     expressions, targets = generate_data()
-    
+    x_train, x_val, y_train, y_val = train_test_split(expressions, targets, test_size=0.2)
+
     # 初始化模型、损失函数和优化器
     embedding_dim = 16
     hidden_dim = 32
     model = AddSubNet(vocab_size, embedding_dim, hidden_dim)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
-    
+
     # 训练模型
-    train_model(model, criterion, optimizer, expressions, targets)
-    
+    train_model(model, criterion, optimizer, x_train, y_train, x_val, y_val)
+
     # 测试模型
     test_expr = "1+2"
     result = test_model(model, test_expr)
