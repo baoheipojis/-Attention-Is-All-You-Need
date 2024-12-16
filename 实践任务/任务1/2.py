@@ -44,7 +44,7 @@ def encode_expression(expr):
     return torch.tensor([char_to_idx[ch] for ch in expr], dtype=torch.long)
 
 # 训练模型
-def train_model(model, criterion, optimizer, x_train, y_train, x_val, y_val, epochs=10):
+def train_model(model, criterion, optimizer, x_train, y_train, x_val, y_val, epochs=20):
     model.train()
     for epoch in range(epochs):
         total_loss = 0
@@ -93,6 +93,6 @@ if __name__ == "__main__":
     train_model(model, criterion, optimizer, x_train, y_train, x_val, y_val)
 
     # 测试模型
-    test_expr = "1+2"
+    test_expr = "1+2-2"
     result = test_model(model, test_expr)
     print(f'{test_expr} = {result:.2f}')
