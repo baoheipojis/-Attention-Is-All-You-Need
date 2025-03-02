@@ -78,8 +78,6 @@ for epoch in range(300):
     
     print(f"Epoch {epoch+1}: Val Acc {val_acc:.1f}%")
 
-# ...（前面数据准备和模型定义部分与之前相同，此处省略）
-
 # 加载最佳模型
 model.load_state_dict(torch.load("best_model.pth"))
 model.eval()
