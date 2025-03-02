@@ -11,7 +11,7 @@ char_to_idx = {ch: idx for idx, ch in enumerate(chinese_chars)}
 idx_to_char = {idx: ch for idx, ch in enumerate(chinese_chars)}
 
 # 测试样例
-test_expressions = ["一+七", "二+三", "四+五", "六+零", "七+二", "三+四"]
+test_expressions = ["一+七", "二+三", "四+五", "六+零", "七+二", "三+五"]
 
 # 生成数据集
 def generate_data(num_samples=100):
@@ -27,25 +27,32 @@ def generate_data(num_samples=100):
     return expressions, targets
 
 # 定义模型
+# ...existing code...
+
 class AddNet(nn.Module):
     def __init__(self, vocab_size, embedding_dim, hidden_dim):
         super(AddNet, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.rnn = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
-        self.fc = nn.Linear(hidden_dim, vocab_size)
+        self.fc1 = nn.Linear(embedding_dim * 2, hidden_dim)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_dim, vocab_size)
         
     def forward(self, x):
-        embeds = self.embedding(x)
-        _, (hidden, _) = self.rnn(embeds)
-        out = self.fc(hidden[-1])
+        # x 形状为 (batch_size, 2)，忽略 '+'
+        embeds = self.embedding(x)           # (batch, 2, embedding_dim)
+        embeds = embeds.view(embeds.size(0), -1)  # (batch, embedding_dim * 2)
+        hidden = self.relu(self.fc1(embeds))
+        out = self.fc2(hidden)
         return out.squeeze()
+
+# ...existing code...
 
 # 编码表达式
 def encode_expression(expr):
     return torch.tensor([char_to_idx[ch] for ch in expr if ch != '+'], dtype=torch.long)
 
 # 训练模型
-def train_model(model, criterion, optimizer, expressions, targets, epochs=30):
+def train_model(model, criterion, optimizer, expressions, targets, epochs=40):
     model.train()
     for epoch in range(epochs):
         # 重新划分训练集和验证集
