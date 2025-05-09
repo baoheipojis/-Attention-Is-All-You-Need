@@ -4,10 +4,10 @@ import torch.nn as nn
 from attention import MultiHeadAttention
 from ffn import PositionwiseFeedForward
 class EncoderLayer(nn.Module):
-    def __init__(self, hidden_dim, num_heads, dropout):
+    def __init__(self, hidden_dim, num_heads,d_ff, dropout):
         super().__init__()
         self.self_attn = MultiHeadAttention(hidden_dim, num_heads)
-        self.ffn = PositionwiseFeedForward(hidden_dim)
+        self.ffn = PositionwiseFeedForward(hidden_dim,d_ff)
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
         # 为什么2个norm，一个dropout呢。这是因为norm是有可学习参数的，两层norm需要区分开，但是dropout就无所谓了，即使是同一个，每次调用的结果也是不一样的。

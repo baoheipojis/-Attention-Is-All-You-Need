@@ -4,12 +4,12 @@ import torch.nn as nn
 from attention import MultiHeadAttention
 from ffn import PositionwiseFeedForward
 class DecoderLayer(nn.Module):
-    def __init__(self, hidden_dim, num_heads, dropout):
+    def __init__(self, hidden_dim, num_heads,d_ff, dropout):
         super().__init__()
         # decoder有两层attention，一个是self attention，一个是cross attention。cross attention的接受encoder的输出。
         self.self_attn = MultiHeadAttention(hidden_dim, num_heads)
         self.cross_attn = MultiHeadAttention(hidden_dim, num_heads)
-        self.ffn = PositionwiseFeedForward(hidden_dim)
+        self.ffn = PositionwiseFeedForward(hidden_dim,d_ff=d_ff)
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.norm2 = nn.LayerNorm(hidden_dim)
         self.norm3 = nn.LayerNorm(hidden_dim)
