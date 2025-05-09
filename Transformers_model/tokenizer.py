@@ -1,4 +1,4 @@
-from tokenizers import Tokenizer, models, trainers, pre_tokenizers, processors
+from tokenizers import Tokenizer, decoders, models, trainers, pre_tokenizers, processors
 
 def build_bpe_tokenizer():
     """论文3.4节BPE分词器实现"""
@@ -34,6 +34,9 @@ def build_bpe_tokenizer():
             ("<eos>", tokenizer.token_to_id("<eos>"))
         ]
     )
+    
+    # configure byte-level decoder for proper text reconstruction
+    tokenizer.decoder = decoders.ByteLevel()
     
     tokenizer.save("bpe_tokenizer.json")
 

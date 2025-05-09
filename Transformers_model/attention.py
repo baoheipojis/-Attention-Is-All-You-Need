@@ -18,11 +18,10 @@ class MultiHeadAttention(nn.Module):
     def forward(self, q, k, v, mask=None):
         batch_size = q.size(0)
         seq_len = q.size(1)
-
-        # 分头处理
-        Q = self.wq(q).reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        K = self.wk(k).reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        V = self.wv(v).reshape(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        # 投影
+        Q = self.wq(q).reshape(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)  # (batch_size, num_heads, seq_len, head_dim)
+        K = self.wk(k).reshape(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)  # 修改这里
+        V = self.wv(v).reshape(batch_size, -1, self.num_heads, self.head_dim).transpose(1, 2)
         # 最后变成了一个(b,nh,s,hd)的矩阵，把nh放到第二维，方便模拟处理多头。
         # 计算注意力分数。Q是(b,nh,s,hd)，K^T是(b,nh,hd,s)，乘起来是(b,nh,s,s)，和我们之前的分析一致。
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.head_dim)

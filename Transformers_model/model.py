@@ -44,7 +44,8 @@ class Transformer(nn.Module):
         # 2. 添加位置编码
         src = self.positional_encoding(src)
         tgt = self.positional_encoding(tgt)
-        src_mask = (src != 0).unsqueeze(1).unsqueeze(2)  # (batch_size, 1, 1, src_len)
+        # 修正src_mask生成逻辑
+        src_mask = (src[:, :, 0] != 0).unsqueeze(1).unsqueeze(2)  # 取嵌入后的序列长度维度
           
         # 3. 编码器
         for layer in self.encoder:
@@ -55,10 +56,19 @@ class Transformer(nn.Module):
         # 修改mask生成逻辑
 
         # 解码器需要两种mask
-        tgt_padding_mask = (tgt != 0).unsqueeze(1).unsqueeze(2)
+        # 修正padding mask维度
+        tgt_padding_mask = (tgt[:, :, 0] != 0).unsqueeze(1).unsqueeze(3).bool()  # 添加.bool()
         seq_length = tgt.size(1)
-        look_ahead_mask = torch.triu(torch.ones(seq_length, seq_length), diagonal=1).bool().to(device)
-        tgt_mask = tgt_padding_mask & look_ahead_mask  # 组合padding和look-ahead mask
+        device = src.device
+        
+        # 生成look-ahead mask并调整维度
+        look_ahead_mask = torch.triu(
+            torch.ones(seq_length, seq_length, device=device), 
+            diagonal=1
+        ).unsqueeze(0).unsqueeze(0).bool()  # 添加.bool()
+        
+        # 组合mask时应保持维度一致
+        tgt_mask = tgt_padding_mask & look_ahead_mask
         
         for layer in self.decoder:
             tgt = layer(tgt, src, src_mask, tgt_mask)
