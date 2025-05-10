@@ -37,38 +37,45 @@ class Transformer(nn.Module):
             Tensor: 模型输出，形状为 (batch_size, tgt_len, vocab_size)。
         """
         
-        # 1. 嵌入输入
+        # 1. 在嵌入前创建掩码
+        # src_mask大小是[batch_size, 1, 1, src_len]。这是因为对于每个batch都不同，但是对于序列中每个位置都相同。为什么要变四维呢？因为后面要分头。
+        src_mask = (src != 0).unsqueeze(1).unsqueeze(2)  # 基于原始输入创建掩码
+        
+        tgt_len = tgt.size(1)
+        # 解码器需要两种mask：padding mask和look-ahead mask
+        # 创建padding mask - 在嵌入前基于原始输入
+        # 修正：创建形状为 [batch_size, 1, tgt_len, tgt_len] 的padding mask
+        tgt_padding_mask = (tgt != 0).unsqueeze(1).unsqueeze(1)  # [batch_size, 1, 1, tgt_len]
+
+        
+        device = src.device
+        
+        # 生成look-ahead mask。triu函数生成上三角矩阵，diagonal表示从主对角线（左上到右下）开始的偏移量，这里为1表示主对角线不保留，
+        look_ahead_mask = torch.triu(
+            torch.ones(tgt_len, tgt_len, device=device), 
+            diagonal=1
+        ).bool()
+        
+        # 将look_ahead_mask调整为合适的维度以便与padding mask组合
+        # look_ahead_mask需要形状为[1, 1, tgt_len, tgt_len]，因为跟batch无关，所以第0维无所谓。
+        look_ahead_mask = look_ahead_mask.unsqueeze(0).unsqueeze(0)
+        look_ahead_mask = ~look_ahead_mask  # 取反，因为我们需要屏蔽未来位置
+        # 将padding mask和look-ahead mask组合 - 维度现在兼容了
+        tgt_mask = tgt_padding_mask & look_ahead_mask
+        
+        # 然后再执行嵌入
         src = self.input_embedding(src) * self.scale
         tgt = self.output_embedding(tgt) * self.scale
         
         # 2. 添加位置编码
         src = self.positional_encoding(src)
         tgt = self.positional_encoding(tgt)
-        # 修正src_mask生成逻辑
-        src_mask = (src[:, :, 0] != 0).unsqueeze(1).unsqueeze(2)  # 取嵌入后的序列长度维度
-          
+        
         # 3. 编码器
         for layer in self.encoder:
-            src = layer(src,src_mask)
+            src = layer(src, src_mask)
         
-        # 4. 解码器
-        # 生成mask
-        # 修改mask生成逻辑
 
-        # 解码器需要两种mask
-        # 修正padding mask维度
-        tgt_padding_mask = (tgt[:, :, 0] != 0).unsqueeze(1).unsqueeze(3).bool()  # 添加.bool()
-        seq_length = tgt.size(1)
-        device = src.device
-        
-        # 生成look-ahead mask并调整维度
-        look_ahead_mask = torch.triu(
-            torch.ones(seq_length, seq_length, device=device), 
-            diagonal=1
-        ).unsqueeze(0).unsqueeze(0).bool()  # 添加.bool()
-        
-        # 组合mask时应保持维度一致
-        tgt_mask = tgt_padding_mask & look_ahead_mask
         
         for layer in self.decoder:
             tgt = layer(tgt, src, src_mask, tgt_mask)
@@ -77,3 +84,41 @@ class Transformer(nn.Module):
         output = self.fc_out(tgt)
         # 眼尖的读者会发现这里相比原论文，少了一层softmax。这是因为不需要显式添加了，我们后面会解释。
         return output
+
+
+if __name__ == "__main__":
+    # 创建一个小型Transformer模型用于测试
+    model = Transformer(d_model=64, nhead=4, num_encoder_layers=2, 
+                       num_decoder_layers=2, d_ff=128, vocab_size=1000, max_len=100)
+    
+    # 创建示例输入批次
+    batch_size = 2
+    src_len = 5
+    tgt_len = 4
+    
+    # 随机生成源序列和目标序列
+    src = torch.randint(1, 1000, (batch_size, src_len))
+    # 添加一些padding
+    src[0, -2:] = 0
+    print(f"源序列: \n{src}")
+    
+    tgt = torch.randint(1, 1000, (batch_size, tgt_len))
+    tgt[1, -2:] = 0
+    print(f"目标序列: \n{tgt}")
+    
+    
+    # 运行模型
+    print("\n--- 模型运行 ---")
+    model.eval()
+    with torch.no_grad():
+        output = model(src, tgt)
+        print(f"模型输入形状: src={src.shape}, tgt={tgt.shape}")
+        print(f"模型输出形状: {output.shape}")
+        
+        # 最高概率预测
+        predictions = torch.argmax(output, dim=-1)
+        print(f"预测结果形状: {predictions.shape}")
+        print(f"预测结果: \n{predictions}")
+    
+    print("\n模型执行成功!")
+
