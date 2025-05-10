@@ -2,11 +2,15 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from tokenizers import Tokenizer
+from transformers import BertTokenizer, XLMRobertaTokenizer
 from model import Transformer  # 确保模型文件存在
 
 class TranslationDataset(Dataset):
-    def __init__(self, src_path, tgt_path, tokenizer_path, max_length=100):
-        self.tokenizer = Tokenizer.from_file(tokenizer_path)
+    def __init__(self, src_path, tgt_path, src_tokenizer_name='bert-base-chinese', 
+                 tgt_tokenizer_name='bert-base-uncased', max_length=100):
+        # 使用预训练的tokenizer，为中文和英文分别加载
+        self.src_tokenizer = BertTokenizer.from_pretrained(src_tokenizer_name)
+        self.tgt_tokenizer = BertTokenizer.from_pretrained(tgt_tokenizer_name)
         self.max_length = max_length
         
         # 读取原始数据
@@ -19,20 +23,25 @@ class TranslationDataset(Dataset):
         return len(self.src_texts)
 
     def __getitem__(self, idx):
-        # 编码并添加特殊符号（论文3.4节）
-        src = self.tokenizer.encode(self.src_texts[idx]).ids
-        tgt = self.tokenizer.encode(self.tgt_texts[idx]).ids
+        # 对源语言(中文)进行编码
+        src_encoding = self.src_tokenizer(
+            self.src_texts[idx],
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
         
-        # 填充序列（论文5.2节）
-        src = src[:self.max_length-2]
-        src = [self.tokenizer.token_to_id('<sos>')] + src + [self.tokenizer.token_to_id('<eos>')]
-        src += [self.tokenizer.token_to_id('<pad>')] * (self.max_length - len(src))
+        # 对目标语言(英文)进行编码
+        tgt_encoding = self.tgt_tokenizer(
+            self.tgt_texts[idx],
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
         
-        tgt = tgt[:self.max_length-2]
-        tgt = [self.tokenizer.token_to_id('<sos>')] + tgt + [self.tokenizer.token_to_id('<eos>')]
-        tgt += [self.tokenizer.token_to_id('<pad>')] * (self.max_length - len(tgt))
-        
-        return torch.LongTensor(src), torch.LongTensor(tgt)
+        return src_encoding['input_ids'].squeeze(), tgt_encoding['input_ids'].squeeze()
 
 def train():
     # 设备配置（支持MPS加速）
@@ -42,21 +51,30 @@ def train():
         'cpu'
     )
     
-    # 初始化数据集（论文5.2节）
-    tokenizer_path = 'bpe_tokenizer.json'
-    # 在文件顶部添加超参数配置
+    # 预训练tokenizer配置
+    src_tokenizer_name = 'bert-base-chinese'  # 中文tokenizer
+    tgt_tokenizer_name = 'bert-base-uncased'  # 英文tokenizer
+    
+    # 获取预训练tokenizer的词汇量大小
+    src_tokenizer = BertTokenizer.from_pretrained(src_tokenizer_name)
+    tgt_tokenizer = BertTokenizer.from_pretrained(tgt_tokenizer_name)
+    src_vocab_size = len(src_tokenizer)
+    tgt_vocab_size = len(tgt_tokenizer)
+    vocab_size = max(src_vocab_size, tgt_vocab_size)  # 选择较大的词汇量
+    
+    # 更新超参数配置
     HYPERPARAMETERS = {
         # 数据参数
-        "BATCH_SIZE": 32,
+        "BATCH_SIZE": 64,
         "MAX_LENGTH": 100,
-        "VOCAB_SIZE": 32000,
+        "VOCAB_SIZE": vocab_size,
         
         # 模型参数
-        "D_MODEL": 512,
-        "NHEAD": 8,
+        "D_MODEL": 128,
+        "NHEAD": 4,
         "NUM_ENCODER_LAYERS": 6,
         "NUM_DECODER_LAYERS": 6,
-        "D_FF": 2048,
+        "D_FF": 512,
         "DROPOUT": 0.1,
         "MAX_LEN": 512,
         
@@ -66,14 +84,18 @@ def train():
         "EPS": 1e-9,
         "WARMUP_STEPS": 4000,
         "CLIP_GRAD_NORM": 1.0,
-        "EPOCHS": 10
+        "EPOCHS": 10,
+        
+        # Tokenizer参数
+        "PAD_TOKEN_ID": src_tokenizer.pad_token_id
     }
     
     # 修改数据集初始化
     train_dataset = TranslationDataset(
-        src_path='data/train.src',
-        tgt_path='data/train.tgt',
-        tokenizer_path=tokenizer_path,
+        src_path='data/train.src',  # 修改为中文数据文件路径
+        tgt_path='data/train.tgt',  # 修改为英文数据文件路径
+        src_tokenizer_name=src_tokenizer_name,
+        tgt_tokenizer_name=tgt_tokenizer_name,
         max_length=HYPERPARAMETERS["MAX_LENGTH"]
     )
     train_loader = DataLoader(train_dataset, batch_size=HYPERPARAMETERS["BATCH_SIZE"], shuffle=True)
@@ -110,10 +132,17 @@ def train():
         for batch_idx, (src, tgt) in enumerate(train_loader):
             src, tgt = src.to(device), tgt.to(device)
             
-            # 前向传播（论文3.2节）
+            # 这里的 tgt[:, :-1] 表示取目标序列的所有样本（第一维），但每个序列只取除了最后一个 token 以外的所有 token（第二维）
+            # 这是因为在训练时，解码器的输入应该是目标序列"移位一位"的结果:
+            # - 解码器输入: <sos> token1 token2 ... tokenN-1 （不包含最后的<eos>）
+            # - 期望输出: token1 token2 ... tokenN-1 <eos> （不包含开头的<sos>）
+            # 也就是用前面的token去预测下一个token
             output = model(src, tgt[:, :-1])
-            loss = nn.CrossEntropyLoss(ignore_index=0)(
-                output.reshape(-1, 32000),
+            
+            # 然后，损失函数会比较模型输出和 tgt[:, 1:] (不包括开头的<sos>)
+            # 实现了经典的"teacher forcing"训练方式
+            loss = nn.CrossEntropyLoss(ignore_index=HYPERPARAMETERS["PAD_TOKEN_ID"])(
+                output.reshape(-1, HYPERPARAMETERS["VOCAB_SIZE"]),
                 tgt[:, 1:].reshape(-1)
             )
             
@@ -128,11 +157,11 @@ def train():
             
             # 每100批次打印日志
             if batch_idx % 100 == 0:
-                print(f'Epoch [{epoch+1}/100] Batch [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f}')
+                print(f'Epoch [{epoch+1}/10] Batch [{batch_idx}/{len(train_loader)}] Loss: {loss.item():.4f}')
         
         # 保存检查点（论文未提及但推荐实现）
         torch.save(model.state_dict(), f'transformer_epoch{epoch+1}.pth')
-        print(f'Epoch [{epoch+1}/100] Average Loss: {total_loss/len(train_loader):.4f}')
+        print(f'Epoch [{epoch+1}/10] Average Loss: {total_loss/len(train_loader):.4f}')
 
 if __name__ == '__main__':
     train()

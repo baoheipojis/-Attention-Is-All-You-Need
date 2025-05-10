@@ -12,7 +12,7 @@ class Transformer(nn.Module):
         super().__init__()
         
         self.input_embedding = nn.Embedding(vocab_size, d_model)
-        self.output_embedding = nn.Embedding(vocab_size, d_model)
+        self.output_embedding = nn.Embedding(vocab_size, d_model, padding_idx=0)
         self.scale = math.sqrt(d_model)
         self.positional_encoding = PositionalEncoding(d_model, max_len)  # Now using defined max_len
         
