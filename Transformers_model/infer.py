@@ -2,10 +2,32 @@ import torch
 from transformers import BertTokenizer
 from model import Transformer
 
+def load_checkpoint(filename, device=None):
+    """加载检查点，支持新旧两种格式"""
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    checkpoint = torch.load(filename, map_location=device)
+    
+    # 检测是否为新格式的检查点（包含model_state_dict等键）
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        print("检测到新格式的检查点文件")
+        model_state_dict = checkpoint['model_state_dict']
+        # 可以获取保存的超参数供参考
+        hyperparams = checkpoint.get('hyperparams', {})
+        epoch = checkpoint.get('epoch', 0)
+        print(f"加载的检查点来自epoch: {epoch}")
+        return model_state_dict, hyperparams
+    else:
+        # 旧格式直接是模型权重
+        print("检测到旧格式的检查点文件")
+        return checkpoint, {}
+
 class Translator:
     def __init__(self, model_path, src_tokenizer_name='bert-base-chinese', 
                  tgt_tokenizer_name='bert-base-uncased', max_length=100):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"使用设备: {self.device}")
         
         # 使用与训练相同的预训练tokenizer
         self.src_tokenizer = BertTokenizer.from_pretrained(src_tokenizer_name)
@@ -29,7 +51,17 @@ class Translator:
             max_len=512
         ).to(self.device)
         
-        self.model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=True))  # 添加 weights_only=True 以解决警告
+        # 加载检查点，支持新旧格式
+        state_dict, hyperparams = load_checkpoint(model_path, self.device)
+        
+        # 如果有超参数，可以打印或者使用它们
+        if hyperparams:
+            print("从检查点加载的超参数:")
+            for key, value in hyperparams.items():
+                if key in ['D_MODEL', 'NHEAD', 'NUM_ENCODER_LAYERS', 'NUM_DECODER_LAYERS', 'D_FF', 'VOCAB_SIZE']:
+                    print(f"  {key}: {value}")
+        
+        self.model.load_state_dict(state_dict)
         self.model.eval()
     
     def _generate_square_subsequent_mask(self, sz):
@@ -138,13 +170,13 @@ class Translator:
 
 if __name__ == "__main__":
     translator = Translator(
-        model_path="transformer_epoch5.pth",
+        model_path="transformer_epoch58.pth",
         src_tokenizer_name='bert-base-chinese',
         tgt_tokenizer_name='bert-base-uncased'
     )
     
     # 示例用法
-    test_sentence = "你好，世界"
+    test_sentence = "你好"
     print(f"Input: {test_sentence}")
     
     # 仅使用贪婪解码
