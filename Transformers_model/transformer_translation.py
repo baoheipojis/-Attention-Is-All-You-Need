@@ -7,6 +7,9 @@ import math
 import time
 import os
 
+# 导入自定义的Transformer模型
+from model import Transformer
+
 #--------------------------------
 # 超参数配置
 #--------------------------------
@@ -32,8 +35,8 @@ EARLY_STOP_THRESHOLD = 0.1  # 早停阈值
 EVAL_EVERY = 50        # 每多少轮进行一次评估
 
 # 文件路径
-SRC_FILE = r"c:\Users\who65\OneDrive - 南京大学\大三上课程\Training and Practice of Scientific Research\科研\Transformer_Reproduction\Transformers_model\data\little.src"
-TGT_FILE = r"c:\Users\who65\OneDrive - 南京大学\大三上课程\Training and Practice of Scientific Research\科研\Transformer_Reproduction\Transformers_model\data\little.tgt"
+SRC_FILE = r"c:\Users\who65\OneDrive - 南京大学\大三上课程\Training and Practice of Scientific Research\科研\Transformer_Reproduction\Transformers_model\data\train.src"
+TGT_FILE = r"c:\Users\who65\OneDrive - 南京大学\大三上课程\Training and Practice of Scientific Research\科研\Transformer_Reproduction\Transformers_model\data\train.tgt"
 MODEL_DIR = os.path.dirname(SRC_FILE)
 BEST_MODEL_PATH = os.path.join(MODEL_DIR, "best_transformer_model.pt")
 FINAL_MODEL_PATH = os.path.join(MODEL_DIR, "transformer_translation_model.pt")
@@ -91,97 +94,49 @@ class TranslationDataset(Dataset):
             'tgt_attention_mask': tgt_encoded['attention_mask'].squeeze()
         }
 
-# Fixed Positional encoding for batch_first=True
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=DROPOUT, max_len=5000):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0)  # [1, max_len, d_model]
-        self.register_buffer('pe', pe)
-        
-    def forward(self, x):
-        x = x + self.pe[:, :x.size(1), :]
-        return self.dropout(x)
-
-# Transformer model for translation
+# 使用自定义Transformer模型替换原TransformerTranslator类
 class TransformerTranslator(nn.Module):
     def __init__(self, src_vocab_size, tgt_vocab_size, d_model=D_MODEL, nhead=N_HEAD, 
                  num_encoder_layers=NUM_ENCODER_LAYERS, num_decoder_layers=NUM_DECODER_LAYERS, 
                  dim_feedforward=DIM_FEEDFORWARD, dropout=DROPOUT):
         super(TransformerTranslator, self).__init__()
         
-        self.d_model = d_model
-        self.src_embed = nn.Embedding(src_vocab_size, d_model)
-        self.tgt_embed = nn.Embedding(tgt_vocab_size, d_model)
-        self.positional_encoding = PositionalEncoding(d_model, dropout)
-        
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=d_model, 
+        # 使用自定义的Transformer模型
+        # 注意：自定义的Transformer已经包含了输出层，它输出的形状是 [batch_size, seq_len, vocab_size]
+        common_vocab_size = max(src_vocab_size, tgt_vocab_size)
+        self.transformer = Transformer(
+            d_model=d_model,
             nhead=nhead,
-            dim_feedforward=dim_feedforward, 
-            dropout=dropout, 
-            batch_first=True
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, 
-            num_layers=num_encoder_layers
-        )
-        
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=d_model, 
-            nhead=nhead,
-            dim_feedforward=dim_feedforward, 
-            dropout=dropout, 
-            batch_first=True
-        )
-        self.transformer_decoder = nn.TransformerDecoder(
-            decoder_layer, 
-            num_layers=num_decoder_layers
+            num_encoder_layers=num_encoder_layers,
+            num_decoder_layers=num_decoder_layers,
+            d_ff=dim_feedforward,
+            vocab_size=common_vocab_size,  # 使用更大的词汇表大小
+            max_len=MAX_LEN,
+            dropout=dropout
         )
         
-        self.fc_out = nn.Linear(d_model, tgt_vocab_size)
-        
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p, gain=1.0)
+        # 记录目标词汇表大小，用于处理输出
+        self.tgt_vocab_size = tgt_vocab_size
+        self.common_vocab_size = common_vocab_size
     
     def forward(self, src, tgt, src_mask=None, tgt_mask=None, src_padding_mask=None, tgt_padding_mask=None):
-        src_emb = self.src_embed(src) * math.sqrt(self.d_model)
-        src_emb = self.positional_encoding(src_emb)
+        # 自定义Transformer模型不需要外部传入掩码，它会在内部创建
+        output = self.transformer(src, tgt)
         
-        tgt_emb = self.tgt_embed(tgt) * math.sqrt(self.d_model)
-        tgt_emb = self.positional_encoding(tgt_emb)
-        
-        memory = self.transformer_encoder(
-            src_emb, 
-            mask=src_mask, 
-            src_key_padding_mask=src_padding_mask
-        )
-        
-        output = self.transformer_decoder(
-            tgt_emb, 
-            memory,
-            tgt_mask=tgt_mask, 
-            memory_mask=None,
-            tgt_key_padding_mask=tgt_padding_mask,
-            memory_key_padding_mask=src_padding_mask
-        )
-        
-        return self.fc_out(output)
+        # 如果模型的输出维度大于目标词汇表维度，需要截断
+        if output.shape[-1] > self.tgt_vocab_size:
+            output = output[..., :self.tgt_vocab_size]
+            
+        return output
 
-# Generate masks for training
+# 简化的掩码生成函数，仅保留给现有代码使用，实际上新的Transformer会自己处理掩码
 def generate_square_subsequent_mask(sz):
     mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
     mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
     return mask.to(device)
 
 def create_masks(src, tgt, src_pad_idx, tgt_pad_idx):
+    # 这个函数仍然保留，但在forward中我们不会使用这些掩码
     src_padding_mask = (src == src_pad_idx)
     tgt_padding_mask = (tgt == tgt_pad_idx)
     tgt_seq_len = tgt.size(1)
@@ -189,7 +144,7 @@ def create_masks(src, tgt, src_pad_idx, tgt_pad_idx):
     src_mask = None
     return src_mask, tgt_mask, src_padding_mask, tgt_padding_mask
 
-# Training function
+# Training function 需要修改使其适应新模型的接口
 def train_epoch(model, dataloader, optimizer, criterion, src_pad_idx, tgt_pad_idx):
     model.train()
     losses = 0
@@ -198,14 +153,18 @@ def train_epoch(model, dataloader, optimizer, criterion, src_pad_idx, tgt_pad_id
         src = batch['src_input_ids'].to(device)
         tgt = batch['tgt_input_ids'].to(device)
         
+        # 保持shift-right逻辑不变
         tgt_input = tgt[:, :-1]
         tgt_output = tgt[:, 1:]
         
-        src_mask, tgt_mask, src_padding_mask, tgt_padding_mask = create_masks(
-            src, tgt_input, src_pad_idx, tgt_pad_idx)
+        # 检查输入ID是否超出预期词汇量大小
+        src = torch.clamp(src, 0, model.common_vocab_size-1)
+        tgt_input = torch.clamp(tgt_input, 0, model.common_vocab_size-1)
         
-        output = model(src, tgt_input, src_mask, tgt_mask, src_padding_mask, tgt_padding_mask)
+        # 在新模型中不需要显式传入掩码，模型会自己处理
+        output = model(src, tgt_input)
         
+        # 输出处理
         output = output.reshape(-1, output.size(-1))
         tgt_output = tgt_output.reshape(-1)
         
@@ -220,7 +179,7 @@ def train_epoch(model, dataloader, optimizer, criterion, src_pad_idx, tgt_pad_id
     
     return losses / len(dataloader)
 
-# Improved translate function for inference
+# 修改translate函数以适应新模型
 def translate(model, src_text, src_tokenizer, tgt_tokenizer, max_len=MAX_LEN):
     model.eval()
     
@@ -232,23 +191,25 @@ def translate(model, src_text, src_tokenizer, tgt_tokenizer, max_len=MAX_LEN):
         truncation=True
     )
     src = tokens['input_ids'].to(device)
-    src_padding_mask = (src == src_tokenizer.pad_token_id)
     
+    # 确保输入ID不超出词汇表范围
+    src = torch.clamp(src, 0, model.common_vocab_size-1)
+    
+    # 从[CLS] token开始
     tgt = torch.ones(1, 1).fill_(tgt_tokenizer.cls_token_id).type_as(src).to(device)
+    tgt = torch.clamp(tgt, 0, model.common_vocab_size-1)
     
     for i in range(max_len - 1):
-        tgt_seq_len = tgt.size(1)
-        tgt_mask = generate_square_subsequent_mask(tgt_seq_len)
-        tgt_padding_mask = (tgt == tgt_tokenizer.pad_token_id)
-        
+        # 不需要显式创建掩码，模型会自己处理
         with torch.no_grad():
-            output = model(src, tgt, None, tgt_mask, src_padding_mask, tgt_padding_mask)
-            prob = output[:, -1, :]
+            output = model(src, tgt)
+            prob = output[:, -1, :]  # 获取最后一个位置的预测
             _, next_word = torch.max(prob, dim=1)
             next_token = next_word.unsqueeze(1)
         
         tgt = torch.cat([tgt, next_token], dim=1)
         
+        # 如果生成了[SEP] token，停止生成
         if next_token.item() == tgt_tokenizer.sep_token_id:
             break
     
