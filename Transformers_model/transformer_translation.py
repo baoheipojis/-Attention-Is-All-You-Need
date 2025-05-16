@@ -15,13 +15,13 @@ from model import Transformer
 #--------------------------------
 # 数据处理参数
 MAX_LEN = 128          # 序列最大长度
-BATCH_SIZE = 3         # 批处理大小
+BATCH_SIZE = 64         # 批处理大小
 
 # 模型架构参数
 D_MODEL = 256          # 模型维度
 N_HEAD = 8             # 注意力头数
-NUM_ENCODER_LAYERS = 3 # 编码器层数
-NUM_DECODER_LAYERS = 3 # 解码器层数
+NUM_ENCODER_LAYERS = 6 # 编码器层数
+NUM_DECODER_LAYERS = 6 # 解码器层数
 DIM_FEEDFORWARD = 512  # 前馈网络维度
 DROPOUT = 0.1          # Dropout概率
 
@@ -33,6 +33,9 @@ NUM_EPOCHS = 500       # 训练轮次
 GRAD_CLIP = 1.0        # 梯度裁剪阈值
 EARLY_STOP_THRESHOLD = 0.1  # 早停阈值
 EVAL_EVERY = 50        # 每多少轮进行一次评估
+WARMUP_STEPS = 4000    # 学习率预热步数
+WARMUP_FACTOR = 0.1    # 预热开始因子，初始学习率 = LEARNING_RATE * WARMUP_FACTOR
+LABEL_SMOOTHING = 0.1  # 标签平滑参数
 
 # 文件路径
 SRC_FILE = r"c:\Users\who65\OneDrive - 南京大学\大三上课程\Training and Practice of Scientific Research\科研\Transformer_Reproduction\Transformers_model\data\train.src"
@@ -40,6 +43,9 @@ TGT_FILE = r"c:\Users\who65\OneDrive - 南京大学\大三上课程\Training and
 MODEL_DIR = os.path.dirname(SRC_FILE)
 BEST_MODEL_PATH = os.path.join(MODEL_DIR, "best_transformer_model.pt")
 FINAL_MODEL_PATH = os.path.join(MODEL_DIR, "transformer_translation_model.pt")
+
+# add a directory to hold per-epoch logs
+LOG_DIR = os.path.join(MODEL_DIR, "logs")
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -144,12 +150,73 @@ def create_masks(src, tgt, src_pad_idx, tgt_pad_idx):
     src_mask = None
     return src_mask, tgt_mask, src_padding_mask, tgt_padding_mask
 
+# 添加学习率预热调度器
+class WarmupLRScheduler:
+    def __init__(self, optimizer, d_model, warmup_steps, warmup_factor, current_step=0):
+        self.optimizer = optimizer
+        self.d_model = d_model
+        self.warmup_steps = warmup_steps
+        self.warmup_factor = warmup_factor
+        self.current_step = current_step
+        self.base_lr = LEARNING_RATE
+        
+        # 初始化学习率
+        self.update_lr()
+    
+    def step(self):
+        self.current_step += 1
+        self.update_lr()
+    
+    def update_lr(self):
+        # 如果在预热阶段，线性增加学习率
+        if self.current_step < self.warmup_steps:
+            # 线性预热：从 warmup_factor * base_lr 到 base_lr
+            lr_scale = self.warmup_factor + (1.0 - self.warmup_factor) * (self.current_step / self.warmup_steps)
+            lr = self.base_lr * lr_scale
+        else:
+            # 预热后使用固定学习率
+            lr = self.base_lr
+            
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        
+    def get_lr(self):
+        return self.optimizer.param_groups[0]['lr']
+
+# 标签平滑损失函数
+class LabelSmoothingLoss(nn.Module):
+    def __init__(self, smoothing, vocab_size, pad_idx, device):
+        super(LabelSmoothingLoss, self).__init__()
+        self.smoothing = smoothing
+        self.vocab_size = vocab_size
+        self.pad_idx = pad_idx
+        self.confidence = 1.0 - smoothing
+        self.criterion = nn.KLDivLoss(reduction='sum')
+        self.device = device
+        
+    def forward(self, pred, target):
+        pred = pred.log_softmax(dim=-1)
+        with torch.no_grad():
+            # 创建平滑标签
+            true_dist = torch.zeros_like(pred)
+            true_dist.fill_(self.smoothing / (self.vocab_size - 2))  # 排除正确标签和padding标签
+            true_dist.scatter_(1, target.unsqueeze(1), self.confidence)
+            # 确保padding标签位置为0
+            mask = torch.nonzero(target == self.pad_idx, as_tuple=False)
+            if mask.dim() > 0:
+                true_dist.index_fill_(0, mask.squeeze(), 0.0)
+        
+        # 计算KL散度
+        loss = self.criterion(pred, true_dist)
+        return loss / (target != self.pad_idx).sum().item()
+
 # Training function 需要修改使其适应新模型的接口
-def train_epoch(model, dataloader, optimizer, criterion, src_pad_idx, tgt_pad_idx):
+def train_epoch(model, dataloader, optimizer, criterion, src_pad_idx, tgt_pad_idx, warmup_scheduler=None):
     model.train()
     losses = 0
+    total_batches = len(dataloader)
     
-    for batch in dataloader:
+    for i, batch in enumerate(dataloader):
         src = batch['src_input_ids'].to(device)
         tgt = batch['tgt_input_ids'].to(device)
         
@@ -175,7 +242,16 @@ def train_epoch(model, dataloader, optimizer, criterion, src_pad_idx, tgt_pad_id
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
         optimizer.step()
         
+        # 更新预热学习率（如果提供了调度器）
+        if warmup_scheduler:
+            warmup_scheduler.step()
+        
         losses += loss.item()
+        
+        # 打印当前批次的学习率（可选，用于调试）
+        if (i+1) % 50 == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            print(f"  Batch {i+1}/{total_batches} | LR: {current_lr:.6f} | Loss: {loss.item():.4f}")
     
     return losses / len(dataloader)
 
@@ -246,13 +322,32 @@ def main():
     
     print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
     
-    criterion = nn.CrossEntropyLoss(ignore_index=tgt_tokenizer.pad_token_id)
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE, betas=BETAS, eps=EPSILON)
+    # 使用标签平滑损失函数替代CrossEntropyLoss
+    criterion = LabelSmoothingLoss(
+        smoothing=LABEL_SMOOTHING,
+        vocab_size=tgt_vocab_size,
+        pad_idx=tgt_tokenizer.pad_token_id,
+        device=device
+    )
     
+    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE*WARMUP_FACTOR, betas=BETAS, eps=EPSILON)
+    
+    # 创建学习率预热调度器
+    warmup_scheduler = WarmupLRScheduler(
+        optimizer=optimizer,
+        d_model=D_MODEL,
+        warmup_steps=WARMUP_STEPS,
+        warmup_factor=WARMUP_FACTOR
+    )
+    
+    # 创建学习率衰减调度器，在预热后使用
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=10, verbose=True
     )
     
+    # ensure log directory exists
+    os.makedirs(LOG_DIR, exist_ok=True)
+
     num_epochs = NUM_EPOCHS
     best_loss = float('inf')
     
@@ -261,24 +356,28 @@ def main():
         
         train_loss = train_epoch(
             model, dataloader, optimizer, criterion,
-            src_tokenizer.pad_token_id, tgt_tokenizer.pad_token_id
+            src_tokenizer.pad_token_id, tgt_tokenizer.pad_token_id,
+            warmup_scheduler=warmup_scheduler  # 传入预热调度器
         )
         
         scheduler.step(train_loss)
         
         elapsed = time.time() - start_time
-        
-        print(f"Epoch {epoch+1}/{num_epochs} | Loss: {train_loss:.4f} | Time: {elapsed:.2f}s")
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch+1}/{num_epochs} | Loss: {train_loss:.4f} | LR: {current_lr:.6f} | Time: {elapsed:.2f}s")
+
+        # write this epoch's loss to a new log file without overwriting
+        log_filename = os.path.join(
+            LOG_DIR,
+            f"epoch_{epoch+1}_{int(time.time())}.log"
+        )
+        with open(log_filename, "w", encoding="utf-8") as log_f:
+            log_f.write(f"Epoch: {epoch+1}, Loss: {train_loss:.4f}\n")
         
         if train_loss < best_loss:
             best_loss = train_loss
-            model_path = BEST_MODEL_PATH
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': best_loss,
-            }, model_path)
+            # 统一保存格式：仅保存模型参数
+            torch.save(model.state_dict(), BEST_MODEL_PATH)
             print(f"New best model saved with loss: {best_loss:.4f}")
         
         if (epoch + 1) % EVAL_EVERY == 0:
@@ -293,9 +392,9 @@ def main():
                 print(f"Loss {train_loss:.4f} is below threshold. Stopping training.")
                 break
     
-    model_path = FINAL_MODEL_PATH
-    torch.save(model.state_dict(), model_path)
-    print(f"Final model saved to {model_path}")
+    # 训练结束后，同样仅保存模型参数
+    torch.save(model.state_dict(), FINAL_MODEL_PATH)
+    print(f"Final model saved to {FINAL_MODEL_PATH}")
     
     print("\nFinal translations:")
     for i, src_text in enumerate(src_texts):
