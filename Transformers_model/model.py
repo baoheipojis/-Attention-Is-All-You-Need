@@ -74,9 +74,7 @@ class Transformer(nn.Module):
         # 3. 编码器
         for layer in self.encoder:
             src = layer(src, src_mask)
-        
-
-        
+        # 4. 解码器
         for layer in self.decoder:
             tgt = layer(tgt, src, src_mask, tgt_mask)
         

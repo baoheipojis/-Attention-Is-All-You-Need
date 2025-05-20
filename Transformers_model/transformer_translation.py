@@ -1,11 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from transformers import BertTokenizer, get_linear_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
-from transformers import BertTokenizer
-import math
-import time
-import os
+import time, os, math
 
 # 导入自定义的Transformer模型
 from model import Transformer
@@ -32,14 +30,14 @@ EPSILON = 1e-9         # Adam优化器的epsilon参数
 NUM_EPOCHS = 500       # 训练轮次
 GRAD_CLIP = 1.0        # 梯度裁剪阈值
 EARLY_STOP_THRESHOLD = 0.1  # 早停阈值
-EVAL_EVERY = 50        # 每多少轮进行一次评估
+EVAL_EVERY = 1       # 每多少轮进行一次评估
 WARMUP_STEPS = 4000    # 学习率预热步数
 WARMUP_FACTOR = 0.1    # 预热开始因子，初始学习率 = LEARNING_RATE * WARMUP_FACTOR
 LABEL_SMOOTHING = 0.1  # 标签平滑参数
 
 # 文件路径
-SRC_FILE = r"c:\Users\who65\OneDrive - 南京大学\大三上课程\Training and Practice of Scientific Research\科研\Transformer_Reproduction\Transformers_model\data\train.src"
-TGT_FILE = r"c:\Users\who65\OneDrive - 南京大学\大三上课程\Training and Practice of Scientific Research\科研\Transformer_Reproduction\Transformers_model\data\train.tgt"
+SRC_FILE = "data/val.src"
+TGT_FILE = "data/val.tgt"
 MODEL_DIR = os.path.dirname(SRC_FILE)
 BEST_MODEL_PATH = os.path.join(MODEL_DIR, "best_transformer_model.pt")
 FINAL_MODEL_PATH = os.path.join(MODEL_DIR, "transformer_translation_model.pt")
@@ -150,115 +148,52 @@ def create_masks(src, tgt, src_pad_idx, tgt_pad_idx):
     src_mask = None
     return src_mask, tgt_mask, src_padding_mask, tgt_padding_mask
 
-# 添加学习率预热调度器
-class WarmupLRScheduler:
-    def __init__(self, optimizer, d_model, warmup_steps, warmup_factor, current_step=0):
-        self.optimizer = optimizer
-        self.d_model = d_model
-        self.warmup_steps = warmup_steps
-        self.warmup_factor = warmup_factor
-        self.current_step = current_step
-        self.base_lr = LEARNING_RATE
-        
-        # 初始化学习率
-        self.update_lr()
-    
-    def step(self):
-        self.current_step += 1
-        self.update_lr()
-    
-    def update_lr(self):
-        # 如果在预热阶段，线性增加学习率
-        if self.current_step < self.warmup_steps:
-            # 线性预热：从 warmup_factor * base_lr 到 base_lr
-            lr_scale = self.warmup_factor + (1.0 - self.warmup_factor) * (self.current_step / self.warmup_steps)
-            lr = self.base_lr * lr_scale
-        else:
-            # 预热后使用固定学习率
-            lr = self.base_lr
-            
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        
-    def get_lr(self):
-        return self.optimizer.param_groups[0]['lr']
-
-# 标签平滑损失函数
-class LabelSmoothingLoss(nn.Module):
-    def __init__(self, smoothing, vocab_size, pad_idx, device):
-        super(LabelSmoothingLoss, self).__init__()
-        self.smoothing = smoothing
-        self.vocab_size = vocab_size
-        self.pad_idx = pad_idx
-        self.confidence = 1.0 - smoothing
-        self.criterion = nn.KLDivLoss(reduction='sum')
-        self.device = device
-        
-    def forward(self, pred, target):
-        pred = pred.log_softmax(dim=-1)
-        with torch.no_grad():
-            # 创建平滑标签
-            true_dist = torch.zeros_like(pred)
-            true_dist.fill_(self.smoothing / (self.vocab_size - 2))  # 排除正确标签和padding标签
-            true_dist.scatter_(1, target.unsqueeze(1), self.confidence)
-            # 确保padding标签位置为0
-            mask = torch.nonzero(target == self.pad_idx, as_tuple=False)
-            if mask.dim() > 0:
-                true_dist.index_fill_(0, mask.squeeze(), 0.0)
-        
-        # 计算KL散度
-        loss = self.criterion(pred, true_dist)
-        return loss / (target != self.pad_idx).sum().item()
-
-# Training function 需要修改使其适应新模型的接口
-def train_epoch(model, dataloader, optimizer, criterion, src_pad_idx, tgt_pad_idx, warmup_scheduler=None):
+# Training loop without custom warmup calls
+def train_epoch(model, dataloader, optimizer, criterion, src_pad_idx, tgt_pad_idx):
     model.train()
-    losses = 0
-    total_batches = len(dataloader)
-    
-    for i, batch in enumerate(dataloader):
+    total_loss = 0
+    for idx, batch in enumerate(dataloader):
         src = batch['src_input_ids'].to(device)
         tgt = batch['tgt_input_ids'].to(device)
-        
-        # 保持shift-right逻辑不变
         tgt_input = tgt[:, :-1]
         tgt_output = tgt[:, 1:]
-        
-        # 检查输入ID是否超出预期词汇量大小
         src = torch.clamp(src, 0, model.common_vocab_size-1)
         tgt_input = torch.clamp(tgt_input, 0, model.common_vocab_size-1)
-        
-        # 在新模型中不需要显式传入掩码，模型会自己处理
         output = model(src, tgt_input)
-        
-        # 输出处理
         output = output.reshape(-1, output.size(-1))
         tgt_output = tgt_output.reshape(-1)
-        
         loss = criterion(output, tgt_output)
-        
+
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), GRAD_CLIP)
         optimizer.step()
-        
-        # 更新预热学习率（如果提供了调度器）
-        if warmup_scheduler:
-            warmup_scheduler.step()
-        
-        losses += loss.item()
-        
-        # 打印当前批次的学习率（可选，用于调试）
-        if (i+1) % 50 == 0:
-            current_lr = optimizer.param_groups[0]['lr']
-            print(f"  Batch {i+1}/{total_batches} | LR: {current_lr:.6f} | Loss: {loss.item():.4f}")
-    
-    return losses / len(dataloader)
+
+        total_loss += loss.item()
+        # print batch progress with carriage return
+        print(f"Batch {idx+1}/{len(dataloader)}, Loss: {loss.item():.4f}\r", end="", flush=True)
+
+    return total_loss / len(dataloader)
 
 # 修改translate函数以适应新模型
-def translate(model, src_text, src_tokenizer, tgt_tokenizer, max_len=MAX_LEN):
+def translate(model, src_text, src_tokenizer, tgt_tokenizer, max_len=MAX_LEN, beam_size=1, length_penalty=0.6):
+    """使用束搜索进行翻译
+    
+    Args:
+        model: 翻译模型
+        src_text: 源文本
+        src_tokenizer: 源语言分词器
+        tgt_tokenizer: 目标语言分词器
+        max_len: 最大生成长度
+        beam_size: 束宽，默认为1（相当于贪心搜索）
+        length_penalty: 长度惩罚系数，0为不惩罚，<1时倾向于短句子，>1时倾向于长句子
+    
+    Returns:
+        翻译后的文本
+    """
     model.eval()
     
+    # 编码输入文本
     tokens = src_tokenizer(
         src_text,
         return_tensors='pt',
@@ -267,31 +202,123 @@ def translate(model, src_text, src_tokenizer, tgt_tokenizer, max_len=MAX_LEN):
         truncation=True
     )
     src = tokens['input_ids'].to(device)
-    
-    # 确保输入ID不超出词汇表范围
     src = torch.clamp(src, 0, model.common_vocab_size-1)
     
-    # 从[CLS] token开始
-    tgt = torch.ones(1, 1).fill_(tgt_tokenizer.cls_token_id).type_as(src).to(device)
-    tgt = torch.clamp(tgt, 0, model.common_vocab_size-1)
+    # 特殊标记ID
+    sos_id = tgt_tokenizer.cls_token_id
+    eos_id = tgt_tokenizer.sep_token_id
     
-    for i in range(max_len - 1):
-        # 不需要显式创建掩码，模型会自己处理
-        with torch.no_grad():
-            output = model(src, tgt)
-            prob = output[:, -1, :]  # 获取最后一个位置的预测
-            _, next_word = torch.max(prob, dim=1)
-            next_token = next_word.unsqueeze(1)
+    with torch.no_grad():
+        # 如果束宽为1，使用贪心搜索（更高效）
+        if beam_size == 1:
+            # 从<sos>标记开始
+            tgt = torch.ones(1, 1).fill_(sos_id).type_as(src).to(device)
+            tgt = torch.clamp(tgt, 0, model.common_vocab_size-1)
+            
+            for i in range(max_len - 1):
+                output = model(src, tgt)
+                prob = output[:, -1, :]  # 获取最后一个位置的预测
+                _, next_word = torch.max(prob, dim=1)
+                next_token = next_word.unsqueeze(1)
+                
+                tgt = torch.cat([tgt, next_token], dim=1)
+                
+                # 如果生成了结束标记，停止生成
+                if next_token.item() == eos_id:
+                    break
+            
+            return tgt_tokenizer.decode(tgt[0].tolist(), skip_special_tokens=True)
         
-        tgt = torch.cat([tgt, next_token], dim=1)
+        # 束搜索实现
+        # 初始化候选序列 - [(序列, 序列得分), ...]
+        k_prev_words = torch.ones(beam_size, 1).long().fill_(sos_id).to(device)
+        k_prev_words = torch.clamp(k_prev_words, 0, model.common_vocab_size-1)
         
-        # 如果生成了[SEP] token，停止生成
-        if next_token.item() == tgt_tokenizer.sep_token_id:
-            break
+        # 候选序列的得分
+        k_scores = torch.zeros(beam_size, device=device)
+        
+        # 完成的候选序列
+        complete_seqs = []
+        complete_seqs_scores = []
+        
+        # 逐步生成序列
+        step = 1
+        while True:
+            # 扩展每个候选序列
+            curr_size = k_prev_words.size(0)  # 当前候选数量
+            src_expanded = src.expand(curr_size, -1)  # (k, src_len)
+            
+            # 对所有候选进行前向计算
+            output = model(src_expanded, k_prev_words)  # (k, step, vocab_size)
+            logits = output[:, -1, :]  # 获取最后一步的输出 (k, vocab_size)
+            
+            # 对数概率和之前的分数相加
+            log_probs = torch.log_softmax(logits, dim=-1)
+            log_probs = log_probs + k_scores.unsqueeze(1)  # (k, vocab_size)
+            
+            # 对于第一步，所有候选的得分都是0，只考虑从第一个序列扩展的结果
+            if step == 1:
+                log_probs = log_probs[0].unsqueeze(0)  # (1, vocab_size)
+            
+            # 展平以便获取前k个候选
+            vocab_size = log_probs.size(-1)
+            log_probs = log_probs.view(-1)  # (k * vocab_size)
+            
+            # 获取分数最高的k个候选词
+            k_scores, k_indices = torch.topk(log_probs, k=min(beam_size, log_probs.size(0)))
+            
+            # 计算这些词属于哪个前序列
+            prev_seq_indices = k_indices // vocab_size  # 商给出之前的候选序列索引
+            next_word_indices = k_indices % vocab_size  # 余数给出词索引
+            
+            # 构建新的候选序列
+            k_next_words = []
+            for i, (prev_seq_idx, next_word_idx) in enumerate(zip(prev_seq_indices, next_word_indices)):
+                # 添加到新候选集
+                new_seq = torch.cat([k_prev_words[prev_seq_idx], next_word_idx.unsqueeze(0)], dim=0)
+                k_next_words.append(new_seq)
+                
+                # 如果生成了结束标记，将其添加到完成序列中
+                if next_word_idx.item() == eos_id:
+                    complete_seqs.append(new_seq)
+                    
+                    # 应用长度惩罚: (5+len(seq))^length_penalty / (5+1)^length_penalty
+                    # 常数5是为了减少对非常短序列的过度惩罚
+                    lp = ((5 + len(new_seq)) ** length_penalty) / ((5 + 1) ** length_penalty)
+                    complete_seqs_scores.append(k_scores[i].item() / lp)
+            
+            # 如果所有候选序列都已完成
+            if len(complete_seqs) >= beam_size:
+                break
+            
+            # 更新候选序列
+            k_prev_words = torch.stack(k_next_words)
+            
+            # 增加步数
+            step += 1
+            
+            # 如果达到最大长度，结束搜索
+            if step > max_len:
+                break
+        
+        # 选择得分最高的完成序列，已应用长度惩罚
+        if complete_seqs:
+            # 从完成的序列中选择最好的
+            i = complete_seqs_scores.index(max(complete_seqs_scores))
+            seq = complete_seqs[i]
+        else:
+            # 如果没有完成的序列，选择当前得分最高的候选
+            # 应用相同的长度惩罚策略
+            penalized_scores = []
+            for i, words in enumerate(k_prev_words):
+                lp = ((5 + len(words)) ** length_penalty) / ((5 + 1) ** length_penalty)
+                penalized_scores.append(k_scores[i].item() / lp)
+            
+            best_idx = penalized_scores.index(max(penalized_scores))
+            seq = k_prev_words[best_idx]
     
-    output_text = tgt_tokenizer.decode(tgt[0].tolist(), skip_special_tokens=True)
-    
-    return output_text
+    # 解码生成的序列
+    return tgt_tokenizer.decode(seq.tolist(), skip_special_tokens=True)
 
 def main():
     src_file = SRC_FILE
@@ -322,49 +349,48 @@ def main():
     
     print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
     
-    # 使用标签平滑损失函数替代CrossEntropyLoss
-    criterion = LabelSmoothingLoss(
-        smoothing=LABEL_SMOOTHING,
-        vocab_size=tgt_vocab_size,
-        pad_idx=tgt_tokenizer.pad_token_id,
-        device=device
+    # use built-in label smoothing
+    criterion = nn.CrossEntropyLoss(
+        ignore_index=tgt_tokenizer.pad_token_id,
+        label_smoothing=LABEL_SMOOTHING
     )
-    
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE*WARMUP_FACTOR, betas=BETAS, eps=EPSILON)
-    
-    # 创建学习率预热调度器
-    warmup_scheduler = WarmupLRScheduler(
-        optimizer=optimizer,
-        d_model=D_MODEL,
-        warmup_steps=WARMUP_STEPS,
-        warmup_factor=WARMUP_FACTOR
+
+    optimizer = optim.Adam(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        betas=BETAS,
+        eps=EPSILON
     )
-    
-    # 创建学习率衰减调度器，在预热后使用
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+
+    # total training steps for scheduler
+    total_steps = len(dataloader) * NUM_EPOCHS
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=WARMUP_STEPS,
+        num_training_steps=total_steps
+    )
+
+    # optional ReduceLROnPlateau if desired
+    lr_plateau = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=10, verbose=True
     )
-    
-    # ensure log directory exists
-    os.makedirs(LOG_DIR, exist_ok=True)
 
-    num_epochs = NUM_EPOCHS
+    os.makedirs(LOG_DIR, exist_ok=True)
     best_loss = float('inf')
-    
-    for epoch in range(num_epochs):
-        start_time = time.time()
-        
+
+    for epoch in range(NUM_EPOCHS):
+        start = time.time()
         train_loss = train_epoch(
             model, dataloader, optimizer, criterion,
-            src_tokenizer.pad_token_id, tgt_tokenizer.pad_token_id,
-            warmup_scheduler=warmup_scheduler  # 传入预热调度器
+            src_tokenizer.pad_token_id, tgt_tokenizer.pad_token_id
         )
-        
-        scheduler.step(train_loss)
-        
-        elapsed = time.time() - start_time
-        current_lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch {epoch+1}/{num_epochs} | Loss: {train_loss:.4f} | LR: {current_lr:.6f} | Time: {elapsed:.2f}s")
+
+        # step schedulers
+        scheduler.step()
+        lr_plateau.step(train_loss)
+
+        elapsed = time.time() - start
+        print(f"Epoch {epoch+1}/{NUM_EPOCHS} | Loss: {train_loss:.4f} | Time: {elapsed:.2f}s")
 
         # write this epoch's loss to a new log file without overwriting
         log_filename = os.path.join(
@@ -382,7 +408,7 @@ def main():
         
         if (epoch + 1) % EVAL_EVERY == 0:
             print("\nTesting translations:")
-            for src_text in src_texts:
+            for src_text in src_texts[:3]:
                 translation = translate(model, src_text, src_tokenizer, tgt_tokenizer)
                 print(f"Source: {src_text}")
                 print(f"Translation: {translation}")
