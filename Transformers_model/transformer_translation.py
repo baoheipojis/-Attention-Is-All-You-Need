@@ -7,6 +7,12 @@ import time, os, math
 
 # 导入自定义的Transformer模型
 from model import Transformer
+from data import load_data  # Importing the new data loader
+
+#--------------------------------
+# 模型选择配置
+#--------------------------------
+USE_CUSTOM_TRANSFORMER = False  # True: 使用自定义Transformer, False: 使用PyTorch nn.Transformer
 
 #--------------------------------
 # 超参数配置
@@ -16,7 +22,7 @@ MAX_LEN = 128          # 序列最大长度
 BATCH_SIZE = 64         # 批处理大小
 
 # 模型架构参数
-D_MODEL = 256          # 模型维度
+D_MODEL = 128         # 模型维度
 N_HEAD = 8             # 注意力头数
 NUM_ENCODER_LAYERS = 6 # 编码器层数
 NUM_DECODER_LAYERS = 6 # 解码器层数
@@ -28,6 +34,7 @@ LEARNING_RATE = 0.001  # 学习率
 BETAS = (0.9, 0.98)    # Adam优化器的beta参数
 EPSILON = 1e-9         # Adam优化器的epsilon参数
 NUM_EPOCHS = 500       # 训练轮次
+RESUME_EPOCH = 122     # 手动设置续训起始轮次，如果为0则从头开始
 GRAD_CLIP = 1.0        # 梯度裁剪阈值
 EARLY_STOP_THRESHOLD = 0.1  # 早停阈值
 EVAL_EVERY = 1       # 每多少轮进行一次评估
@@ -39,8 +46,10 @@ LABEL_SMOOTHING = 0.1  # 标签平滑参数
 SRC_FILE = "data/val.src"
 TGT_FILE = "data/val.tgt"
 MODEL_DIR = os.path.dirname(SRC_FILE)
-BEST_MODEL_PATH = os.path.join(MODEL_DIR, "best_transformer_model.pt")
-FINAL_MODEL_PATH = os.path.join(MODEL_DIR, "transformer_translation_model.pt")
+model_suffix = "" if USE_CUSTOM_TRANSFORMER else "_pytorch"
+BEST_MODEL_PATH = os.path.join(MODEL_DIR, f"best_transformer_model{model_suffix}.pt")
+FINAL_MODEL_PATH = os.path.join(MODEL_DIR, f"transformer_translation_model{model_suffix}.pt")
+CHECKPOINT_PATH = os.path.join(MODEL_DIR, f"training_checkpoint{model_suffix}.pt")
 
 # add a directory to hold per-epoch logs
 LOG_DIR = os.path.join(MODEL_DIR, "logs")
@@ -48,16 +57,6 @@ LOG_DIR = os.path.join(MODEL_DIR, "logs")
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
-
-# Load data
-def load_data(src_file, tgt_file):
-    with open(src_file, 'r', encoding='utf-8') as f:
-        src_data = [line.strip() for line in f.readlines()]
-    
-    with open(tgt_file, 'r', encoding='utf-8') as f:
-        tgt_data = [line.strip() for line in f.readlines()]
-    
-    return src_data, tgt_data
 
 # Dataset class for translation
 class TranslationDataset(Dataset):
@@ -105,33 +104,78 @@ class TransformerTranslator(nn.Module):
                  dim_feedforward=DIM_FEEDFORWARD, dropout=DROPOUT):
         super(TransformerTranslator, self).__init__()
         
-        # 使用自定义的Transformer模型
-        # 注意：自定义的Transformer已经包含了输出层，它输出的形状是 [batch_size, seq_len, vocab_size]
-        common_vocab_size = max(src_vocab_size, tgt_vocab_size)
-        self.transformer = Transformer(
-            d_model=d_model,
-            nhead=nhead,
-            num_encoder_layers=num_encoder_layers,
-            num_decoder_layers=num_decoder_layers,
-            d_ff=dim_feedforward,
-            vocab_size=common_vocab_size,  # 使用更大的词汇表大小
-            max_len=MAX_LEN,
-            dropout=dropout
-        )
-        
-        # 记录目标词汇表大小，用于处理输出
+        self.use_custom = USE_CUSTOM_TRANSFORMER
         self.tgt_vocab_size = tgt_vocab_size
-        self.common_vocab_size = common_vocab_size
+        
+        if USE_CUSTOM_TRANSFORMER:
+            print("[INFO] Using custom Transformer implementation")
+            # 使用自定义的Transformer模型
+            common_vocab_size = max(src_vocab_size, tgt_vocab_size)
+            self.transformer = Transformer(
+                d_model=d_model,
+                nhead=nhead,
+                num_encoder_layers=num_encoder_layers,
+                num_decoder_layers=num_decoder_layers,
+                d_ff=dim_feedforward,
+                vocab_size=common_vocab_size,
+                max_len=MAX_LEN,
+                dropout=dropout
+            )
+            self.common_vocab_size = common_vocab_size
+        else:
+            print("[INFO] Using PyTorch nn.Transformer implementation")
+            # 使用PyTorch内置的Transformer
+            self.src_embedding = nn.Embedding(src_vocab_size, d_model)
+            self.tgt_embedding = nn.Embedding(tgt_vocab_size, d_model)
+            self.pos_encoding = nn.Parameter(torch.randn(MAX_LEN, d_model))
+            
+            self.transformer = nn.Transformer(
+                d_model=d_model,
+                nhead=nhead,
+                num_encoder_layers=num_encoder_layers,
+                num_decoder_layers=num_decoder_layers,
+                dim_feedforward=dim_feedforward,
+                dropout=dropout,
+                batch_first=True
+            )
+            
+            self.output_projection = nn.Linear(d_model, tgt_vocab_size)
+            self.common_vocab_size = tgt_vocab_size
     
     def forward(self, src, tgt, src_mask=None, tgt_mask=None, src_padding_mask=None, tgt_padding_mask=None):
-        # 自定义Transformer模型不需要外部传入掩码，它会在内部创建
-        output = self.transformer(src, tgt)
-        
-        # 如果模型的输出维度大于目标词汇表维度，需要截断
-        if output.shape[-1] > self.tgt_vocab_size:
-            output = output[..., :self.tgt_vocab_size]
+        if self.use_custom:
+            # 自定义Transformer模型不需要外部传入掩码，它会在内部创建
+            output = self.transformer(src, tgt)
             
-        return output
+            # 如果模型的输出维度大于目标词汇表维度，需要截断
+            if output.shape[-1] > self.tgt_vocab_size:
+                output = output[..., :self.tgt_vocab_size]
+                
+            return output
+        else:
+            # PyTorch nn.Transformer需要手动处理embedding和掩码
+            batch_size, src_len = src.shape
+            tgt_len = tgt.shape[1]
+            
+            # 添加位置编码
+            src_emb = self.src_embedding(src) + self.pos_encoding[:src_len].unsqueeze(0)
+            tgt_emb = self.tgt_embedding(tgt) + self.pos_encoding[:tgt_len].unsqueeze(0)
+            
+            # 创建掩码
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_len).to(src.device)
+            
+            # Transformer前向传播
+            output = self.transformer(
+                src_emb, tgt_emb, 
+                tgt_mask=tgt_mask,
+                src_key_padding_mask=src_padding_mask,
+                tgt_key_padding_mask=tgt_padding_mask
+            )
+            
+            # 输出投影
+            output = self.output_projection(output)
+            
+            return output
 
 # 简化的掩码生成函数，仅保留给现有代码使用，实际上新的Transformer会自己处理掩码
 def generate_square_subsequent_mask(sz):
@@ -320,12 +364,53 @@ def translate(model, src_text, src_tokenizer, tgt_tokenizer, max_len=MAX_LEN, be
     # 解码生成的序列
     return tgt_tokenizer.decode(seq.tolist(), skip_special_tokens=True)
 
+def save_checkpoint(epoch, model, optimizer, scheduler, lr_plateau, best_loss, checkpoint_path):
+    """保存训练检查点"""
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'lr_plateau_state_dict': lr_plateau.state_dict(),
+        'best_loss': best_loss,
+    }
+    torch.save(checkpoint, checkpoint_path)
+    print(f"Checkpoint saved at epoch {epoch}")
+
+def load_checkpoint(checkpoint_path, model, optimizer, scheduler, lr_plateau):
+    """加载训练检查点"""
+    if os.path.exists(checkpoint_path):
+        print(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        lr_plateau.load_state_dict(checkpoint['lr_plateau_state_dict'])
+        
+        start_epoch = checkpoint['epoch'] + 1
+        best_loss = checkpoint['best_loss']
+        
+        print(f"Resumed from epoch {checkpoint['epoch']}, best loss: {best_loss:.4f}")
+        return start_epoch, best_loss
+    elif RESUME_EPOCH > 0 and os.path.exists(BEST_MODEL_PATH):
+        # 如果没有checkpoint但有best model且设置了续训轮次
+        print(f"Loading best model from {BEST_MODEL_PATH}")
+        model.load_state_dict(torch.load(BEST_MODEL_PATH, map_location=device))
+        print(f"Resuming from epoch {RESUME_EPOCH} (optimizer and scheduler states reset)")
+        print("Warning: Learning rate schedule will restart from beginning")
+        return RESUME_EPOCH, 4.2428  # 使用你提到的最佳loss值
+    else:
+        print("No checkpoint found, starting from scratch")
+        return 0, float('inf')
+
 def main():
-    src_file = SRC_FILE
-    tgt_file = TGT_FILE
-    
-    src_texts, tgt_texts = load_data(src_file, tgt_file)
+    # 加载训练和验证数据
+    src_texts, tgt_texts = load_data(split="train", sample_size=200000)
     print(f"Loaded {len(src_texts)} translation pairs")
+    
+    val_src_texts, val_tgt_texts = load_data(split="validation", sample_size=500)
+    print(f"Loaded {len(val_src_texts)} validation pairs")
     
     src_tokenizer = BertTokenizer.from_pretrained('bert-base-chinese')
     tgt_tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
@@ -335,6 +420,9 @@ def main():
     
     src_vocab_size = src_tokenizer.vocab_size
     tgt_vocab_size = tgt_tokenizer.vocab_size
+    
+    model_type = "custom" if USE_CUSTOM_TRANSFORMER else "pytorch"
+    print(f"Creating {model_type} Transformer model...")
     
     model = TransformerTranslator(
         src_vocab_size=src_vocab_size,
@@ -347,7 +435,7 @@ def main():
         dropout=DROPOUT
     ).to(device)
     
-    print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
+    print(f"{model_type.capitalize()} model created with {sum(p.numel() for p in model.parameters())} parameters")
     
     # use built-in label smoothing
     criterion = nn.CrossEntropyLoss(
@@ -376,9 +464,11 @@ def main():
     )
 
     os.makedirs(LOG_DIR, exist_ok=True)
-    best_loss = float('inf')
+    
+    # 加载检查点（如果存在）
+    start_epoch, best_loss = load_checkpoint(CHECKPOINT_PATH, model, optimizer, scheduler, lr_plateau)
 
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(start_epoch, NUM_EPOCHS):
         start = time.time()
         train_loss = train_epoch(
             model, dataloader, optimizer, criterion,
@@ -406,6 +496,10 @@ def main():
             torch.save(model.state_dict(), BEST_MODEL_PATH)
             print(f"New best model saved with loss: {best_loss:.4f}")
         
+        # 每5个epoch保存一次检查点，避免频繁IO
+        if (epoch + 1) % 5 == 0:
+            save_checkpoint(epoch, model, optimizer, scheduler, lr_plateau, best_loss, CHECKPOINT_PATH)
+        
         if (epoch + 1) % EVAL_EVERY == 0:
             print("\nTesting translations:")
             for src_text in src_texts[:3]:
@@ -417,6 +511,9 @@ def main():
             if train_loss < EARLY_STOP_THRESHOLD:
                 print(f"Loss {train_loss:.4f} is below threshold. Stopping training.")
                 break
+    
+    # 训练结束前保存最终检查点
+    save_checkpoint(epoch, model, optimizer, scheduler, lr_plateau, best_loss, CHECKPOINT_PATH)
     
     # 训练结束后，同样仅保存模型参数
     torch.save(model.state_dict(), FINAL_MODEL_PATH)

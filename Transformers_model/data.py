@@ -1,10 +1,23 @@
 from datasets import load_dataset
 
-# 加载 WMT17 中文-英文翻译数据集
-dataset = load_dataset("wmt19", "zh-en", cache_dir=".")
-
-# 查看训练集中的前几个样本
-for example in dataset['train'].select(range(10)):
-    print(f"中文: {example['translation']['zh']}")
-    print(f"英文: {example['translation']['en']}")
-    print()
+def load_data(split="train", sample_size=200000):
+    """
+    Load zh→en pairs from WMT19.
+    split: one of "train","validation","test"
+    sample_size: number of examples to load (default 10000).
+    """
+    # Use streaming to avoid downloading the entire dataset
+    dataset = load_dataset("wmt19", cache_dir="./cache_small", streaming=True)
+    ds = dataset[split]
+    
+    src_texts = []
+    tgt_texts = []
+    
+    # Only process the required number of samples
+    for i, ex in enumerate(ds):
+        if sample_size and i >= sample_size:
+            break
+        src_texts.append(ex["translation"]["zh"])
+        tgt_texts.append(ex["translation"]["en"])
+    
+    return src_texts, tgt_texts

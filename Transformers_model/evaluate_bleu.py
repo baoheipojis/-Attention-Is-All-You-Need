@@ -1,6 +1,7 @@
 import torch
 from transformers import BertTokenizer
 import sacrebleu
+import os
 
 from transformer_translation import (
     TransformerTranslator,
@@ -15,18 +16,27 @@ from transformer_translation import (
     DIM_FEEDFORWARD,
     DROPOUT,
     MAX_LEN,
+    USE_CUSTOM_TRANSFORMER,
 )
 FINAL_MODEL_PATH = BEST_MODEL_PATH
-SRC_FILE = "data/val.src"
-TGT_FILE = "data/val.tgt"
 
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
+    
+    model_type = "custom" if USE_CUSTOM_TRANSFORMER else "pytorch"
+    print(f"[INFO] Using {model_type} Transformer implementation")
+
+    # 检查模型文件是否存在
+    if not os.path.exists(FINAL_MODEL_PATH):
+        print(f"[ERROR] Model file not found: {FINAL_MODEL_PATH}")
+        print(f"[INFO] Please train the model first using transformer_translation.py")
+        print(f"[INFO] Current configuration: USE_CUSTOM_TRANSFORMER = {USE_CUSTOM_TRANSFORMER}")
+        return
 
     # 加载验证集
-    print(f"[INFO] Loading data from {SRC_FILE} and {TGT_FILE} ...")
-    src_texts, tgt_texts = load_data(SRC_FILE, TGT_FILE)
+    print(f"[INFO] Loading test data from WMT19 ...")
+    src_texts, tgt_texts = load_data(split="validation", sample_size=100)
     print(f"[INFO] Loaded {len(src_texts)} samples.")
 
     # 初始化分词器
@@ -46,7 +56,14 @@ def main():
         dim_feedforward=DIM_FEEDFORWARD,
         dropout=DROPOUT,
     ).to(device)
-    model.load_state_dict(torch.load(FINAL_MODEL_PATH, map_location=device))
+    
+    try:
+        model.load_state_dict(torch.load(FINAL_MODEL_PATH, map_location=device))
+        print(f"[INFO] Successfully loaded model from {FINAL_MODEL_PATH}")
+    except Exception as e:
+        print(f"[ERROR] Failed to load model: {e}")
+        return
+        
     model.eval()
     print("[INFO] Model is ready. Starting translation ...")
 
@@ -55,7 +72,7 @@ def main():
     total = len(src_texts)
     for idx, src in enumerate(src_texts, 1):
         print(f"[PROGRESS] Translating {idx}/{total}", end="\r", flush=True)
-        hyp = translate(model, src, src_tokenizer, tgt_tokenizer, max_len=MAX_LEN,beam_size=10,length_penalty=0.6)
+        hyp = translate(model, src, src_tokenizer, tgt_tokenizer, max_len=MAX_LEN,beam_size=5,length_penalty=0)
         hyps.append(hyp)
     print("\n[INFO] Translation complete.")
 
